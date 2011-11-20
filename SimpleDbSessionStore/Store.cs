@@ -578,12 +578,12 @@ namespace SimpleDbSessionStore
 
             writer.Close();
 
-            return Convert.ToBase64String(ms.ToArray());
+            return GetAscii85().Encode(ms.ToArray());
         }
 
         public static SessionStateStoreData Deserialize(HttpContext context, string serializedItems, int timeout)
         {
-            var ms = new MemoryStream(Convert.FromBase64String(serializedItems));
+            var ms = new MemoryStream(GetAscii85().Decode(serializedItems));
 
             var sessionItems = new SessionStateItemCollection();
 
@@ -596,6 +596,11 @@ namespace SimpleDbSessionStore
             return new SessionStateStoreData(sessionItems,
                                              SessionStateUtility.GetSessionStaticObjects(context),
                                              timeout);
+        }
+
+        private static Ascii85 GetAscii85()
+        {
+            return new Ascii85 {EnforceMarks = false, LineLength = 0};
         }
     }
 }
