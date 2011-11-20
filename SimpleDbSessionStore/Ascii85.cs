@@ -129,14 +129,26 @@ class Ascii85
 		return ms.ToArray();
 	}
 
-	/// <summary>
-	/// Encodes binary data into a plaintext ASCII85 format string
-	/// </summary>
-	/// <param name="ba">binary data to encode</param>
-	/// <returns>ASCII85 encoded string</returns>
+    /// <summary>
+    /// Encodes binary data into a plaintext ASCII85 format string
+    /// </summary>
+    /// <param name="ba">binary data to encode</param>
+    /// <returns>ASCII85 encoded string</returns>
 	public string Encode(byte[] ba)
 	{
-		StringBuilder sb = new StringBuilder((int)(ba.Length * (_encodedBlock.Length/_decodedBlock.Length)));
+	    return Encode(ba, 0, ba.Length);
+	}
+
+    /// <summary>
+    /// Encodes binary data into a plaintext ASCII85 format string
+    /// </summary>
+    /// <param name="ba">binary data to encode</param>
+    /// <param name="offset">Offset to start.</param>
+    /// <param name="length">Number of bytes to be encoded.</param>
+    /// <returns>ASCII85 encoded string</returns>
+    public string Encode(byte[] ba, int offset, int length)
+	{
+		StringBuilder sb = new StringBuilder((int)(length * (_encodedBlock.Length/_decodedBlock.Length)));
 		_linePos = 0;
 
 		if (EnforceMarks) 
@@ -146,8 +158,10 @@ class Ascii85
 
 		int count = 0;
 		_tuple = 0;
-		foreach (byte b in ba)
+	    for (int i = offset; i < offset + length; i++)
 		{
+		    byte b = ba[i];
+            
 			if (count >= _decodedBlock.Length - 1)
 			{
 				_tuple |= b;

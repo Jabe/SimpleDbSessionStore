@@ -4,6 +4,7 @@ using System.Collections.Specialized;
 using System.Configuration;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -23,6 +24,7 @@ namespace SimpleDbSessionStore
     {
         private static readonly CultureInfo Ic = CultureInfo.InvariantCulture;
 
+        private bool _compress;
         private AmazonSimpleDB _client;
         private string _domain;
         private string _key;
@@ -48,6 +50,8 @@ namespace SimpleDbSessionStore
 
             Configuration cfg = WebConfigurationManager.OpenWebConfiguration(HostingEnvironment.ApplicationVirtualPath);
             _pConfig = (SessionStateSection) cfg.GetSection("system.web/sessionState");
+
+            _compress = _pConfig.CompressionEnabled;
 
             _key = config["key"];
             _secret = config["secret"];
@@ -568,34 +572,76 @@ namespace SimpleDbSessionStore
             return false;
         }
 
-        public static string Serialize(SessionStateItemCollection items)
+        private string Serialize(SessionStateItemCollection items)
         {
-            var ms = new MemoryStream();
-            var writer = new BinaryWriter(ms);
+            if (items == null) return ""; // ascii85 of empty byte[]
 
-            if (items != null)
+            using (var ms = new MemoryStream())
+            using (var writer = new BinaryWriter(ms))
+            {
                 items.Serialize(writer);
 
-            writer.Close();
+                // finish serialization
+                writer.Flush();
 
-            return GetAscii85().Encode(ms.ToArray());
+                // final uncompressed length
+                var length = (int) ms.Length;
+
+                // get 'the' buffer
+                byte[] buffer = ms.GetBuffer();
+
+                if (_compress)
+                {
+                    // this wont clear the buffer (data will be overwritten)
+                    ms.SetLength(0);
+
+                    // create a deflate stream with the memory stream as target.
+                    using (var compressor = new DeflateStream(ms, CompressionMode.Compress, true))
+                    {
+                        // write all data from 'the' buffer to 'the' buffer. :-)
+                        compressor.Write(buffer, 0, length);
+                    }
+
+                    // final compressed length
+                    length = (int) ms.Length;
+                }
+
+                return GetAscii85().Encode(buffer, 0, length);
+            }
         }
 
-        public static SessionStateStoreData Deserialize(HttpContext context, string serializedItems, int timeout)
+        private SessionStateStoreData Deserialize(HttpContext context, string serializedItems, int timeout)
         {
-            var ms = new MemoryStream(GetAscii85().Decode(serializedItems));
+            HttpStaticObjectsCollection staticObjects = SessionStateUtility.GetSessionStaticObjects(context);
 
-            var sessionItems = new SessionStateItemCollection();
+            byte[] bytes = GetAscii85().Decode(serializedItems);
 
-            if (ms.Length > 0)
+            SessionStateItemCollection sessionItems;
+
+            if (bytes.Length > 0)
             {
-                var reader = new BinaryReader(ms);
-                sessionItems = SessionStateItemCollection.Deserialize(reader);
+                using (var ms = new MemoryStream(bytes))
+                {
+                    Stream target = ms;
+
+                    if (_compress)
+                    {
+                        target = new DeflateStream(target, CompressionMode.Decompress);
+                    }
+
+                    using (target)
+                    using (var reader = new BinaryReader(target))
+                    {
+                        sessionItems = SessionStateItemCollection.Deserialize(reader);
+                    }
+                }
+            }
+            else
+            {
+                sessionItems = new SessionStateItemCollection();
             }
 
-            return new SessionStateStoreData(sessionItems,
-                                             SessionStateUtility.GetSessionStaticObjects(context),
-                                             timeout);
+            return new SessionStateStoreData(sessionItems, staticObjects, timeout);
         }
 
         private static Ascii85 GetAscii85()
