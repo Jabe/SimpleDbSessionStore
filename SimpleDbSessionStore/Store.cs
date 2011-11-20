@@ -190,6 +190,8 @@ namespace SimpleDbSessionStore
             // lockRecord is true when called from GetItemExclusive and
             // false when called from GetItem.
             // Obtain a lock if possible. Ignore the record if it is expired.
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+
             if (lockRecord)
             {
                 var request = new PutAttributesRequest
@@ -203,43 +205,24 @@ namespace SimpleDbSessionStore
                                                      }
                                   };
 
-                DateTimeOffset now = DateTimeOffset.UtcNow;
-
                 Attr(request, "Locked", true);
                 Attr(request, "LockDate", now);
 
                 try
                 {
                     _client.PutAttributes(request);
-
-                    locked = false;
-
-                    // we got the lock, check expires
-                    var gar = new GetAttributesRequest
-                                  {
-                                      DomainName = _domain,
-                                      ItemName = BuildItemName(id),
-                                      ConsistentRead = true,
-                                  };
-
-                    gar.AttributeName.Add("Expires");
-
-                    GetAttributesResponse result2 = _client.GetAttributes(gar);
-                    List<Attribute> attr2 = result2.GetAttributesResult.Attribute;
-
-                    expires = DateTimeOffset.Parse(attr2.First(x => x.Name == "Expires").Value, Ic);
-
-                    if (expires < DateTimeOffset.UtcNow)
-                    {
-                        // oops the record is expired. handle it as locked.
-                        locked = true;
-                    }
                 }
                 catch (AmazonSimpleDBException e)
                 {
                     if (e.StatusCode == HttpStatusCode.Conflict)
                     {
+                        // couldnt obtain the lock
                         locked = true;
+                    }
+                    else if (e.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        // "Locked" attrib does not exist and the condition failed. the record is invalid.
+                        deleteData = true;
                     }
                     else
                     {
@@ -248,46 +231,58 @@ namespace SimpleDbSessionStore
                 }
             }
 
-            // Retrieve the current session item information.
-
-            var gr = new GetAttributesRequest
-                         {
-                             DomainName = _domain,
-                             ItemName = BuildItemName(id),
-                             ConsistentRead = true,
-                         };
-
-            gr.AttributeName.Add("Expires");
-            gr.AttributeName.Add("SessionItems");
-            gr.AttributeName.Add("LockId");
-            gr.AttributeName.Add("LockDate");
-            gr.AttributeName.Add("Flags");
-            gr.AttributeName.Add("Timeout");
-
-            GetAttributesResponse result = _client.GetAttributes(gr);
-            List<Attribute> attr = result.GetAttributesResult.Attribute;
-
-            expires = DateTimeOffset.Parse(attr.First(x => x.Name == "Expires").Value, Ic);
-
-            if (expires < DateTimeOffset.UtcNow)
+            if (!deleteData)
             {
-                // The record was expired. Mark it as not locked.
-                locked = false;
-                // The session was expired. Mark the data for deletion.
-                deleteData = true;
+                // Retrieve the current session item information.
+                var gr = new GetAttributesRequest
+                             {
+                                 DomainName = _domain,
+                                 ItemName = BuildItemName(id),
+                                 ConsistentRead = true,
+                             };
+
+                gr.AttributeName.Add("Expires");
+                gr.AttributeName.Add("SessionItems");
+                gr.AttributeName.Add("LockId");
+                gr.AttributeName.Add("LockDate");
+                gr.AttributeName.Add("Flags");
+                gr.AttributeName.Add("Timeout");
+
+                GetAttributesResponse result = _client.GetAttributes(gr);
+                List<Attribute> attr = result.GetAttributesResult.Attribute;
+
+                if (attr.Count > 0)
+                {
+                    expires = DateTimeOffset.Parse(attr.First(x => x.Name == "Expires").Value, Ic);
+
+                    if (expires < now)
+                    {
+                        // The record was expired. Mark it as not locked.
+                        locked = false;
+                        // The session was expired. Mark the data for deletion.
+                        deleteData = true;
+                    }
+                    else
+                    {
+                        foundRecord = true;
+                    }
+
+                    serializedItems = attr.First(x => x.Name == "SessionItems").Value;
+                    lockId = attr.First(x => x.Name == "LockId").Value;
+                    lockAge = now.Subtract(DateTimeOffset.Parse(attr.First(x => x.Name == "LockDate").Value, Ic));
+                    actionFlags = (SessionStateActions) Convert.ToInt32(attr.First(x => x.Name == "Flags").Value, Ic);
+                    timeout = Convert.ToInt32(attr.First(x => x.Name == "Timeout").Value, Ic);
+                }
+                else
+                {
+                    locked = false;
+                    foundRecord = false;
+                }
             }
             else
             {
-                foundRecord = true;
+                
             }
-
-            serializedItems = attr.First(x => x.Name == "SessionItems").Value;
-            lockId = attr.First(x => x.Name == "LockId").Value;
-            lockAge =
-                DateTimeOffset.UtcNow.Subtract(DateTimeOffset.Parse(attr.First(x => x.Name == "LockDate").Value, Ic));
-            actionFlags = (SessionStateActions) Convert.ToInt32(attr.First(x => x.Name == "Flags").Value, Ic);
-            timeout = Convert.ToInt32(attr.First(x => x.Name == "Timeout").Value, Ic);
-
 
             // If the returned session item is expired, 
             // delete the record from the data source.
@@ -313,14 +308,11 @@ namespace SimpleDbSessionStore
             {
                 lockId = Convert.ToInt32(lockId, Ic) + 1;
 
-
                 var request = new PutAttributesRequest
                                   {
                                       DomainName = _domain,
                                       ItemName = BuildItemName(id),
                                   };
-
-                DateTimeOffset now = DateTimeOffset.UtcNow;
 
                 Attr(request, "LockId", lockId);
                 Attr(request, "Flags", 0);
@@ -409,7 +401,7 @@ namespace SimpleDbSessionStore
                 // OdbcCommand to clear an existing expired session if it exists.
 
                 const string query = @"select itemName() from {0} where itemName() = '{1}' and Expires < '{2}'";
-                string ts = Convert.ToString(DateTimeOffset.UtcNow, Ic);
+                string ts = DateTimeOffset.UtcNow.ToString("o");
 
                 var r = new SelectRequest
                             {
