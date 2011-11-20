@@ -12,6 +12,14 @@ namespace SimpleDbSessionStore
 
             Session["counter"] = (int) Session["counter"] + 1;
 
+            if (Session["big"] != null)
+            {
+                if ((string) Session["big"] != "".PadLeft(3000, '#'))
+                    throw new Exception("big");
+            }
+
+            Session["big"] = "".PadLeft(3000, '#');
+
             base.OnLoad(e);
         }
     }

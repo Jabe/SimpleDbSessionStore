@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text;
 using System.Web;
 using System.Web.Configuration;
 using System.Web.Hosting;
@@ -94,6 +95,11 @@ namespace SimpleDbSessionStore
 
         private static void Attr(PutAttributesRequest request, string name, object value, bool replace = true)
         {
+            request.Attribute.Add(new ReplaceableAttribute {Name = name, Replace = replace, Value = ToString(value)});
+        }
+
+        private static string ToString(object value)
+        {
             string str;
 
             if (value is DateTimeOffset)
@@ -105,7 +111,71 @@ namespace SimpleDbSessionStore
                 str = Convert.ToString(value, Ic);
             }
 
-            request.Attribute.Add(new ReplaceableAttribute {Name = name, Replace = replace, Value = str});
+            return str;
+        }
+
+        private static T FromString<T>(string str)
+        {
+            object val;
+
+            if (typeof(T) == typeof(DateTimeOffset))
+            {
+                val = DateTimeOffset.ParseExact(str, "o", Ic);
+            }
+            else if (typeof(T) == typeof(bool))
+            {
+                val = Convert.ToBoolean(str, Ic);
+            }
+            else if (typeof(T) == typeof(int))
+            {
+                val = Convert.ToInt32(str, Ic);
+            }
+            else
+            {
+                throw new Exception("Unsupported type: " + typeof(T).Name);
+            }
+
+            return (T) val;
+        }
+
+        private static IEnumerable<string> SplitStringWithIndex(string str, int chunkSize)
+        {
+            return SplitString(str, chunkSize).Select((s,i) => i.ToString("X2") + s);
+        }
+
+        private static IEnumerable<string> SplitString(string str, int chunkSize)
+        {
+            int bytes = Encoding.UTF8.GetByteCount(str);
+
+            // shortcut
+            if (bytes < chunkSize)
+            {
+                return new[] {str};
+            }
+
+            var chunks = new List<string>();
+
+            Encoder encoder = Encoding.UTF8.GetEncoder();
+
+            var outputBytes = new byte[chunkSize];
+            char[] input = str.ToCharArray();
+
+            bool completed = false;
+
+            for (int i = 0; !completed;)
+            {
+                int bytesUsed;
+                int charsUsed;
+
+                encoder.Convert(input, i, input.Length - i, outputBytes, 0, outputBytes.Length, true, out charsUsed,
+                                out bytesUsed, out completed);
+
+                chunks.Add(Encoding.UTF8.GetString(outputBytes, 0, bytesUsed));
+
+                i += charsUsed;
+            }
+
+            return chunks;
         }
 
         public override void Dispose()
@@ -201,7 +271,7 @@ namespace SimpleDbSessionStore
                                       Expected = new UpdateCondition
                                                      {
                                                          Name = "Locked",
-                                                         Value = Convert.ToString(false, Ic),
+                                                         Value = ToString(false),
                                                      }
                                   };
 
@@ -253,7 +323,7 @@ namespace SimpleDbSessionStore
 
                 if (attr.Count > 0)
                 {
-                    expires = DateTimeOffset.Parse(attr.First(x => x.Name == "Expires").Value, Ic);
+                    expires = FromString<DateTimeOffset>(attr.First(x => x.Name == "Expires").Value);
 
                     if (expires < now)
                     {
@@ -267,11 +337,12 @@ namespace SimpleDbSessionStore
                         foundRecord = true;
                     }
 
-                    serializedItems = attr.First(x => x.Name == "SessionItems").Value;
-                    lockId = attr.First(x => x.Name == "LockId").Value;
-                    lockAge = now.Subtract(DateTimeOffset.Parse(attr.First(x => x.Name == "LockDate").Value, Ic));
-                    actionFlags = (SessionStateActions) Convert.ToInt32(attr.First(x => x.Name == "Flags").Value, Ic);
-                    timeout = Convert.ToInt32(attr.First(x => x.Name == "Timeout").Value, Ic);
+                    lockId = FromString<int>(attr.First(x => x.Name == "LockId").Value);
+                    lockAge = now.Subtract(FromString<DateTimeOffset>(attr.First(x => x.Name == "LockDate").Value));
+                    actionFlags = (SessionStateActions) FromString<int>(attr.First(x => x.Name == "Flags").Value);
+                    timeout = FromString<int>(attr.First(x => x.Name == "Timeout").Value);
+
+                    serializedItems = UnSplitStringWithIndex(attr.Where(x => x.Name == "SessionItems").Select(x => x.Value));
                 }
                 else
                 {
@@ -306,7 +377,7 @@ namespace SimpleDbSessionStore
             // and create the SessionStateStoreItem to return.
             if (foundRecord && !locked)
             {
-                lockId = Convert.ToInt32(lockId, Ic) + 1;
+                lockId = (int) lockId + 1;
 
                 var request = new PutAttributesRequest
                                   {
@@ -330,7 +401,21 @@ namespace SimpleDbSessionStore
             return item;
         }
 
+        private string UnSplitStringWithIndex(IEnumerable<string> chunks)
+        {
+            var str = "";
 
+            foreach (var s in chunks.OrderBy(x => x))
+            {
+                if (s != "")
+                {
+                    str += s.Substring(2);
+                }
+            }
+
+            return str;
+        }
+        
         public override void InitializeRequest(HttpContext context)
         {
         }
@@ -344,7 +429,7 @@ namespace SimpleDbSessionStore
                                   Expected = new UpdateCondition
                                                  {
                                                      Name = "LockId",
-                                                     Value = Convert.ToString(lockId, Ic),
+                                                     Value = ToString(lockId),
                                                  },
                               };
 
@@ -365,7 +450,7 @@ namespace SimpleDbSessionStore
                               Expected = new UpdateCondition
                                              {
                                                  Name = "LockId",
-                                                 Value = Convert.ToString(lockId, Ic),
+                                                 Value = ToString(lockId),
                                              },
                           };
 
@@ -401,7 +486,7 @@ namespace SimpleDbSessionStore
                 // OdbcCommand to clear an existing expired session if it exists.
 
                 const string query = @"select itemName() from {0} where itemName() = '{1}' and Expires < '{2}'";
-                string ts = DateTimeOffset.UtcNow.ToString("o");
+                string ts = ToString(DateTimeOffset.UtcNow);
 
                 var r = new SelectRequest
                             {
@@ -440,8 +525,12 @@ namespace SimpleDbSessionStore
                 Attr(request, "LockId", 0);
                 Attr(request, "Timeout", item.Timeout);
                 Attr(request, "Locked", false);
-                Attr(request, "SessionItems", sessItems);
                 Attr(request, "Flags", 0);
+
+                foreach (var s in SplitStringWithIndex(sessItems, 1000))
+                {
+                    Attr(request, "SessionItems", s);
+                }
 
                 _client.PutAttributes(request);
             }
@@ -456,15 +545,19 @@ namespace SimpleDbSessionStore
                                       Expected = new UpdateCondition
                                                      {
                                                          Name = "LockId",
-                                                         Value = Convert.ToString(lockId, Ic),
+                                                         Value = ToString(lockId),
                                                      }
                                   };
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
 
                 Attr(request, "Expires", now.AddMinutes(item.Timeout));
-                Attr(request, "SessionItems", sessItems);
                 Attr(request, "Locked", false);
+
+                foreach (var s in SplitStringWithIndex(sessItems, 1000))
+                {
+                    Attr(request, "SessionItems", s);
+                }
 
                 _client.PutAttributes(request);
             }
@@ -492,8 +585,7 @@ namespace SimpleDbSessionStore
         {
             var ms = new MemoryStream(Convert.FromBase64String(serializedItems));
 
-            var sessionItems =
-                new SessionStateItemCollection();
+            var sessionItems = new SessionStateItemCollection();
 
             if (ms.Length > 0)
             {
