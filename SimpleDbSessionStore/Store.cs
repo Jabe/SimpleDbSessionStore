@@ -130,15 +130,17 @@ namespace SimpleDbSessionStore
 
         public override void ReleaseItemExclusive(HttpContext context, string id, object lockId)
         {
+            var expected = new UpdateCondition
+                               {
+                                   Name = "LockId",
+                                   Value = ToString(lockId)
+                               };
+
             var request = new PutAttributesRequest
                               {
                                   DomainName = _domain,
                                   ItemName = BuildItemName(id),
-                                  Expected = new UpdateCondition
-                                                 {
-                                                     Name = "LockId",
-                                                     Value = ToString(lockId),
-                                                 },
+                                  Expected = expected
                               };
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -146,23 +148,51 @@ namespace SimpleDbSessionStore
             Attr(request, "Expires", now.AddMinutes(_configSection.Timeout.TotalMinutes));
             Attr(request, "Locked", false);
 
-            _client.PutAttributes(request);
+            try
+            {
+                _client.PutAttributes(request);
+            }
+            catch (AmazonSimpleDBException e)
+            {
+                if (e.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // lock failed. nothing to release. let's just walk away...
+                    return;
+                }
+
+                throw;
+            }
         }
 
         public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
         {
-            var del = new DeleteAttributesRequest
-                          {
-                              DomainName = _domain,
-                              ItemName = BuildItemName(id),
-                              Expected = new UpdateCondition
-                                             {
-                                                 Name = "LockId",
-                                                 Value = ToString(lockId),
-                                             },
-                          };
+            var expected = new UpdateCondition
+                               {
+                                   Name = "LockId",
+                                   Value = ToString(lockId)
+                               };
 
-            _client.DeleteAttributes(del);
+            var request = new DeleteAttributesRequest
+                              {
+                                  DomainName = _domain,
+                                  ItemName = BuildItemName(id),
+                                  Expected = expected
+                              };
+
+            try
+            {
+                _client.DeleteAttributes(request);
+            }
+            catch (AmazonSimpleDBException e)
+            {
+                if (e.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // lock failed. back off!
+                    return;
+                }
+
+                throw;
+            }
         }
 
         public override void ResetItemTimeout(HttpContext context, string id)
@@ -170,7 +200,7 @@ namespace SimpleDbSessionStore
             var request = new PutAttributesRequest
                               {
                                   DomainName = _domain,
-                                  ItemName = BuildItemName(id),
+                                  ItemName = BuildItemName(id)
                               };
 
             Attr(request, "Timeout", _configSection.Timeout.TotalMinutes);
@@ -181,39 +211,14 @@ namespace SimpleDbSessionStore
         public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item,
                                                         object lockId, bool newItem)
         {
-            // Serialize the SessionStateItemCollection as a string.
-            string sessItems = Serialize((SessionStateItemCollection) item.Items);
+            string sessItems = Serialize(item.Items as SessionStateItemCollection);
 
             if (newItem)
             {
-                // OdbcCommand to clear an existing expired session if it exists.
+                // write a new session
+                // the sample provider had some code here to clean up a potentially expired session.
+                // well. we just overwrite the session completely.
 
-                const string query = @"select itemName() from {0} where itemName() = '{1}' and Expires < '{2}'";
-                string ts = ToString(DateTimeOffset.UtcNow);
-
-                var r = new SelectRequest
-                            {
-                                SelectExpression = string.Format(query, _domain, BuildItemName(id), ts),
-                                ConsistentRead = true,
-                            };
-
-                DeleteableItem[] ids = _client.Select(r).SelectResult.Item
-                    .Select(x => new DeleteableItem {ItemName = x.Name})
-                    .ToArray();
-
-                if (ids.Any())
-                {
-                    var dr = new BatchDeleteAttributesRequest
-                                 {
-                                     DomainName = _domain,
-                                     Item = ids.ToList(),
-                                 };
-
-                    _client.BatchDeleteAttributes(dr);
-                }
-
-
-                // OdbcCommand to insert the new session item.
                 var request = new PutAttributesRequest
                                   {
                                       DomainName = _domain,
@@ -230,26 +235,28 @@ namespace SimpleDbSessionStore
                 Attr(request, "Locked", false);
                 Attr(request, "Flags", 0);
 
-                foreach (string s in SplitStringWithIndex(sessItems, 1000))
+                foreach (string value in SplitStringWithIndex(sessItems, 1000))
                 {
-                    Attr(request, "SessionItems", s);
+                    Attr(request, "SessionItems", value);
                 }
 
                 _client.PutAttributes(request);
             }
             else
             {
-                // OdbcCommand to update the existing session item.
+                // update the existing session
+
+                var expected = new UpdateCondition
+                                   {
+                                       Name = "LockId",
+                                       Value = ToString(lockId)
+                                   };
 
                 var request = new PutAttributesRequest
                                   {
                                       DomainName = _domain,
                                       ItemName = BuildItemName(id),
-                                      Expected = new UpdateCondition
-                                                     {
-                                                         Name = "LockId",
-                                                         Value = ToString(lockId),
-                                                     }
+                                      Expected = expected
                                   };
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -257,12 +264,25 @@ namespace SimpleDbSessionStore
                 Attr(request, "Expires", now.AddMinutes(item.Timeout));
                 Attr(request, "Locked", false);
 
-                foreach (string s in SplitStringWithIndex(sessItems, 1000))
+                foreach (string value in SplitStringWithIndex(sessItems, 1000))
                 {
-                    Attr(request, "SessionItems", s);
+                    Attr(request, "SessionItems", value);
                 }
 
-                _client.PutAttributes(request);
+                try
+                {
+                    _client.PutAttributes(request);
+                }
+                catch (AmazonSimpleDBException e)
+                {
+                    if (e.StatusCode == HttpStatusCode.Conflict)
+                    {
+                        // lock failed. I think it would be best to back-off.
+                        return;
+                    }
+
+                    throw;
+                }
             }
         }
 
@@ -271,12 +291,8 @@ namespace SimpleDbSessionStore
             return false;
         }
 
-        private SessionStateStoreData GetSessionStoreItem(bool lockRecord,
-                                                          HttpContext context,
-                                                          string id,
-                                                          out bool locked,
-                                                          out TimeSpan lockAge,
-                                                          out object lockId,
+        private SessionStateStoreData GetSessionStoreItem(bool lockRecord, HttpContext context, string id,
+                                                          out bool locked, out TimeSpan lockAge, out object lockId,
                                                           out SessionStateActions actionFlags)
         {
             // GetSessionStoreItem is called by both the GetItem and 
@@ -292,136 +308,80 @@ namespace SimpleDbSessionStore
             locked = false;
             actionFlags = 0;
 
-            // DateTime to check if current session item is expired.
-            DateTimeOffset expires;
             // String to hold serialized SessionStateItemCollection.
             string serializedItems = "";
             // True if a record is found in the database.
-            bool foundRecord = false;
-            // True if the returned session item is expired and needs to be deleted.
-            bool deleteData = false;
+            bool found = true;
             // Timeout value from the data store.
             int timeout = 0;
 
             // lockRecord is true when called from GetItemExclusive and
             // false when called from GetItem.
             // Obtain a lock if possible. Ignore the record if it is expired.
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-
+            
             if (lockRecord)
             {
-                var request = new PutAttributesRequest
-                                  {
-                                      DomainName = _domain,
-                                      ItemName = BuildItemName(id),
-                                      Expected = new UpdateCondition
-                                                     {
-                                                         Name = "Locked",
-                                                         Value = ToString(false),
-                                                     }
-                                  };
-
-                Attr(request, "Locked", true);
-                Attr(request, "LockDate", now);
-
-                try
-                {
-                    _client.PutAttributes(request);
-                }
-                catch (AmazonSimpleDBException e)
-                {
-                    if (e.StatusCode == HttpStatusCode.Conflict)
-                    {
-                        // couldnt obtain the lock
-                        locked = true;
-                    }
-                    else if (e.StatusCode == HttpStatusCode.NotFound)
-                    {
-                        // "Locked" attrib does not exist and the condition failed. the record is invalid.
-                        deleteData = true;
-                    }
-                    else
-                    {
-                        throw;
-                    }
-                }
+                // TODO: we could run both queries in parallel
+                TryAcquireLock(id, out locked, out found);
             }
 
-            if (!deleteData)
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+
+            // shortcut if record wasnt found while locking
+            if (found)
             {
-                // Retrieve the current session item information.
-                var gr = new GetAttributesRequest
-                             {
-                                 DomainName = _domain,
-                                 ItemName = BuildItemName(id),
-                                 ConsistentRead = true,
-                             };
+                found = false;
 
-                gr.AttributeName.Add("Expires");
-                gr.AttributeName.Add("SessionItems");
-                gr.AttributeName.Add("LockId");
-                gr.AttributeName.Add("LockDate");
-                gr.AttributeName.Add("Flags");
-                gr.AttributeName.Add("Timeout");
+                // TODO: we could run both queries in parallel
+                List<Attribute> attributes = LoadSession(id);
 
-                GetAttributesResponse result = _client.GetAttributes(gr);
-                List<Attribute> attr = result.GetAttributesResult.Attribute;
-
-                if (attr.Count > 0)
+                // valid looking session?
+                // Timeout is most likly to be set... so look for > 1
+                // after we return, CreateUninitializedItem will be called, then we again.
+                if (attributes.Count > 1)
                 {
-                    expires = FromString<DateTimeOffset>(attr.First(x => x.Name == "Expires").Value);
-
-                    if (expires < now)
+                    try
                     {
-                        // The record was expired. Mark it as not locked.
+                        var expires = FromString<DateTimeOffset>(FirstVal("Expires", attributes));
+
+                        if (expires > now)
+                        {
+                            lockId = FromString<int>(FirstVal("LockId", attributes));
+                            lockAge = now.Subtract(FromString<DateTimeOffset>(FirstVal("LockDate", attributes)));
+                            actionFlags = (SessionStateActions) FromString<int>(FirstVal("Flags", attributes));
+                            timeout = FromString<int>(FirstVal("Timeout", attributes));
+
+                            IEnumerable<string> chunks = attributes
+                                .Where(x => x.Name == "SessionItems")
+                                .Select(x => x.Value);
+
+                            serializedItems = UnSplitStringWithIndex(chunks);
+
+                            found = true;
+                        }
+                        else
+                        {
+                            // expired
+                            // TODO: janitor for cleanup. 
+                            locked = false;
+                        }
+                    }
+                    catch
+                    {
+                        // invalid session data
                         locked = false;
-                        // The session was expired. Mark the data for deletion.
-                        deleteData = true;
                     }
-                    else
-                    {
-                        foundRecord = true;
-                    }
-
-                    lockId = FromString<int>(attr.First(x => x.Name == "LockId").Value);
-                    lockAge = now.Subtract(FromString<DateTimeOffset>(attr.First(x => x.Name == "LockDate").Value));
-                    actionFlags = (SessionStateActions) FromString<int>(attr.First(x => x.Name == "Flags").Value);
-                    timeout = FromString<int>(attr.First(x => x.Name == "Timeout").Value);
-
-                    serializedItems =
-                        UnSplitStringWithIndex(attr.Where(x => x.Name == "SessionItems").Select(x => x.Value));
                 }
                 else
                 {
                     locked = false;
-                    foundRecord = false;
                 }
             }
-            else
-            {
-            }
-
-            // If the returned session item is expired, 
-            // delete the record from the data source.
-            if (deleteData)
-            {
-                var del = new DeleteAttributesRequest
-                              {
-                                  DomainName = _domain,
-                                  ItemName = BuildItemName(id),
-                              };
-
-                _client.DeleteAttributes(del);
-            }
-
-            // The record was not found. Ensure that locked is false.
-            if (!foundRecord)
-                locked = false;
 
             // If the record was found and you obtained a lock, then set 
             // the lockId, clear the actionFlags,
             // and create the SessionStateStoreItem to return.
-            if (foundRecord && !locked)
+            if (found && !locked)
             {
                 lockId = (int) lockId + 1;
 
@@ -439,12 +399,86 @@ namespace SimpleDbSessionStore
                 // If the actionFlags parameter is not InitializeItem, 
                 // deserialize the stored SessionStateItemCollection.
                 if (actionFlags == SessionStateActions.InitializeItem)
+                {
                     item = CreateNewStoreData(context, (int) _configSection.Timeout.TotalMinutes);
+                }
                 else
+                {
                     item = Deserialize(context, serializedItems, timeout);
+                }
             }
 
+            // item == null leads to CreateUninitializedItem
+
             return item;
+        }
+
+        private void TryAcquireLock(string id, out bool locked, out bool found)
+        {
+            DateTimeOffset now = DateTimeOffset.Now;
+
+            var expected = new UpdateCondition
+                               {
+                                   Name = "Locked",
+                                   Value = ToString(false)
+                               };
+
+            var request = new PutAttributesRequest
+                              {
+                                  DomainName = _domain,
+                                  ItemName = BuildItemName(id),
+                                  Expected = expected
+                              };
+
+            Attr(request, "Locked", true);
+            Attr(request, "LockDate", now);
+
+            // best case
+            locked = false;
+            found = true;
+
+            try
+            {
+                _client.PutAttributes(request);
+            }
+            catch (AmazonSimpleDBException e)
+            {
+                if (e.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // couldnt obtain the lock
+                    locked = true;
+                }
+                else if (e.StatusCode == HttpStatusCode.NotFound)
+                {
+                    // "Locked" attr failed.
+                    found = false;
+                }
+                else
+                {
+                    throw;
+                }
+            }
+        }
+
+        private List<Attribute> LoadSession(string id)
+        {
+            var request = new GetAttributesRequest
+                              {
+                                  DomainName = _domain,
+                                  ItemName = BuildItemName(id),
+                                  ConsistentRead = true
+                              };
+
+            request.AttributeName.Add("Expires");
+            request.AttributeName.Add("SessionItems");
+            request.AttributeName.Add("LockId");
+            request.AttributeName.Add("LockDate");
+            request.AttributeName.Add("Flags");
+            request.AttributeName.Add("Timeout");
+
+            GetAttributesResponse result = _client.GetAttributes(request);
+
+            return result.GetAttributesResult.Attribute;
         }
 
         private string Serialize(SessionStateItemCollection items)
@@ -627,6 +661,11 @@ namespace SimpleDbSessionStore
         private static Ascii85 GetAscii85()
         {
             return new Ascii85 {EnforceMarks = false, LineLength = 0};
+        }
+
+        private static string FirstVal(string s, IEnumerable<Attribute> attributes)
+        {
+            return attributes.First(x => x.Name == s).Value;
         }
     }
 }
