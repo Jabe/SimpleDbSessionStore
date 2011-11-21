@@ -24,11 +24,11 @@ namespace SimpleDbSessionStore
     {
         private static readonly CultureInfo Ic = CultureInfo.InvariantCulture;
 
-        private bool _compress;
         private AmazonSimpleDB _client;
+        private bool _compress;
+        private SessionStateSection _configSection;
         private string _domain;
         private string _key;
-        private SessionStateSection _pConfig;
         private string _prefix;
         private string _secret;
 
@@ -36,12 +36,12 @@ namespace SimpleDbSessionStore
         {
             if (config == null) throw new ArgumentNullException("config");
 
-            if (String.IsNullOrEmpty(name))
+            if (string.IsNullOrEmpty(name))
             {
                 name = "SdbSessionStateStore";
             }
 
-            if (String.IsNullOrEmpty(config["description"]))
+            if (string.IsNullOrEmpty(config["description"]))
             {
                 config["description"] = "SimpleDB Session Provider";
             }
@@ -49,19 +49,19 @@ namespace SimpleDbSessionStore
             base.Initialize(name, config);
 
             Configuration cfg = WebConfigurationManager.OpenWebConfiguration(HostingEnvironment.ApplicationVirtualPath);
-            _pConfig = (SessionStateSection) cfg.GetSection("system.web/sessionState");
+            _configSection = (SessionStateSection) cfg.GetSection("system.web/sessionState");
 
-            _compress = _pConfig.CompressionEnabled;
+            _compress = _configSection.CompressionEnabled;
 
             _key = config["key"];
             _secret = config["secret"];
             _domain = config["domain"];
             _prefix = config["prefix"];
 
-            if (String.IsNullOrEmpty(_key)) throw new ArgumentException("key");
-            if (String.IsNullOrEmpty(_secret)) throw new ArgumentException("secret");
-            if (String.IsNullOrEmpty(_domain)) throw new ArgumentException("domain");
-            if (String.IsNullOrEmpty(_prefix)) throw new ArgumentException("prefix");
+            if (string.IsNullOrEmpty(_key)) throw new ArgumentException("key");
+            if (string.IsNullOrEmpty(_secret)) throw new ArgumentException("secret");
+            if (string.IsNullOrEmpty(_domain)) throw new ArgumentException("domain");
+            if (string.IsNullOrEmpty(_prefix)) throw new ArgumentException("prefix");
 
             // TODO: config
             var sdbc = new AmazonSimpleDBConfig {ServiceURL = "https://sdb.eu-west-1.amazonaws.com"};
@@ -97,107 +97,8 @@ namespace SimpleDbSessionStore
             _client.PutAttributes(request);
         }
 
-        private static void Attr(PutAttributesRequest request, string name, object value, bool replace = true)
-        {
-            request.Attribute.Add(new ReplaceableAttribute {Name = name, Replace = replace, Value = ToString(value)});
-        }
-
-        private static string ToString(object value)
-        {
-            string str;
-
-            if (value is DateTimeOffset)
-            {
-                str = ((DateTimeOffset) value).ToString("o");
-            }
-            else
-            {
-                str = Convert.ToString(value, Ic);
-            }
-
-            return str;
-        }
-
-        private static T FromString<T>(string str)
-        {
-            object val;
-
-            if (typeof(T) == typeof(DateTimeOffset))
-            {
-                val = DateTimeOffset.ParseExact(str, "o", Ic);
-            }
-            else if (typeof(T) == typeof(bool))
-            {
-                val = Convert.ToBoolean(str, Ic);
-            }
-            else if (typeof(T) == typeof(int))
-            {
-                val = Convert.ToInt32(str, Ic);
-            }
-            else
-            {
-                throw new Exception("Unsupported type: " + typeof(T).Name);
-            }
-
-            return (T) val;
-        }
-
-        private static IEnumerable<string> SplitStringWithIndex(string str, int chunkSize)
-        {
-            return SplitString(str, chunkSize).Select((s,i) => i.ToString("X2") + s);
-        }
-
-        private static IEnumerable<string> SplitString(string str, int chunkSize)
-        {
-            int bytes = Encoding.UTF8.GetByteCount(str);
-
-            // shortcut
-            if (bytes < chunkSize)
-            {
-                return new[] {str};
-            }
-
-            var chunks = new List<string>();
-
-            Encoder encoder = Encoding.UTF8.GetEncoder();
-
-            var outputBytes = new byte[chunkSize];
-            char[] input = str.ToCharArray();
-
-            bool completed = false;
-
-            for (int i = 0; !completed;)
-            {
-                int bytesUsed;
-                int charsUsed;
-
-                encoder.Convert(input, i, input.Length - i, outputBytes, 0, outputBytes.Length, true, out charsUsed,
-                                out bytesUsed, out completed);
-
-                chunks.Add(Encoding.UTF8.GetString(outputBytes, 0, bytesUsed));
-
-                i += charsUsed;
-            }
-
-            return chunks;
-        }
-
         public override void Dispose()
         {
-//CREATE TABLE Sessions
-//(
-//  SessionId       Text(80)  NOT NULL,
-//  ApplicationName Text(255) NOT NULL,
-//  Created         DateTime  NOT NULL,
-//  Expires         DateTime  NOT NULL,
-//  LockDate        DateTime  NOT NULL,
-//  LockId          Integer   NOT NULL,
-//  Timeout         Integer   NOT NULL,
-//  Locked          YesNo     NOT NULL,
-//  SessionItems    Memo,
-//  Flags           Integer   NOT NULL,
-//    CONSTRAINT PKSessions PRIMARY KEY (SessionId, ApplicationName)
-//)
         }
 
         public override void EndRequest(HttpContext context)
@@ -218,22 +119,152 @@ namespace SimpleDbSessionStore
             return GetSessionStoreItem(true, context, id, out locked, out lockAge, out lockId, out actionFlags);
         }
 
+        public override void InitializeRequest(HttpContext context)
+        {
+        }
 
-        //
-        // GetSessionStoreItem is called by both the GetItem and 
-        // GetItemExclusive methods. GetSessionStoreItem retrieves the 
-        // session data from the data source. If the lockRecord parameter
-        // is true (in the case of GetItemExclusive), then GetSessionStoreItem
-        // locks the record and sets a new LockId and LockDate.
-        //
+        public override void ReleaseItemExclusive(HttpContext context, string id, object lockId)
+        {
+            var request = new PutAttributesRequest
+                              {
+                                  DomainName = _domain,
+                                  ItemName = BuildItemName(id),
+                                  Expected = new UpdateCondition
+                                                 {
+                                                     Name = "LockId",
+                                                     Value = ToString(lockId),
+                                                 },
+                              };
 
-        //
-        // GetSessionStoreItem is called by both the GetItem and 
-        // GetItemExclusive methods. GetSessionStoreItem retrieves the 
-        // session data from the data source. If the lockRecord parameter
-        // is true (in the case of GetItemExclusive), then GetSessionStoreItem
-        // locks the record and sets a new LockId and LockDate.
-        //
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+
+            Attr(request, "Expires", now.AddMinutes(_configSection.Timeout.TotalMinutes));
+            Attr(request, "Locked", false);
+
+            _client.PutAttributes(request);
+        }
+
+        public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
+        {
+            var del = new DeleteAttributesRequest
+                          {
+                              DomainName = _domain,
+                              ItemName = BuildItemName(id),
+                              Expected = new UpdateCondition
+                                             {
+                                                 Name = "LockId",
+                                                 Value = ToString(lockId),
+                                             },
+                          };
+
+            _client.DeleteAttributes(del);
+        }
+
+        public override void ResetItemTimeout(HttpContext context, string id)
+        {
+            var request = new PutAttributesRequest
+                              {
+                                  DomainName = _domain,
+                                  ItemName = BuildItemName(id),
+                              };
+
+            Attr(request, "Timeout", _configSection.Timeout.TotalMinutes);
+
+            _client.PutAttributes(request);
+        }
+
+        public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item,
+                                                        object lockId, bool newItem)
+        {
+            // Serialize the SessionStateItemCollection as a string.
+            string sessItems = Serialize((SessionStateItemCollection) item.Items);
+
+            if (newItem)
+            {
+                // OdbcCommand to clear an existing expired session if it exists.
+
+                const string query = @"select itemName() from {0} where itemName() = '{1}' and Expires < '{2}'";
+                string ts = ToString(DateTimeOffset.UtcNow);
+
+                var r = new SelectRequest
+                            {
+                                SelectExpression = string.Format(query, _domain, BuildItemName(id), ts),
+                                ConsistentRead = true,
+                            };
+
+                DeleteableItem[] ids = _client.Select(r).SelectResult.Item
+                    .Select(x => new DeleteableItem {ItemName = x.Name})
+                    .ToArray();
+
+                if (ids.Any())
+                {
+                    var dr = new BatchDeleteAttributesRequest
+                                 {
+                                     DomainName = _domain,
+                                     Item = ids.ToList(),
+                                 };
+
+                    _client.BatchDeleteAttributes(dr);
+                }
+
+
+                // OdbcCommand to insert the new session item.
+                var request = new PutAttributesRequest
+                                  {
+                                      DomainName = _domain,
+                                      ItemName = BuildItemName(id),
+                                  };
+
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+
+                Attr(request, "Created", now);
+                Attr(request, "Expires", now.AddMinutes(item.Timeout));
+                Attr(request, "LockDate", now);
+                Attr(request, "LockId", 0);
+                Attr(request, "Timeout", item.Timeout);
+                Attr(request, "Locked", false);
+                Attr(request, "Flags", 0);
+
+                foreach (string s in SplitStringWithIndex(sessItems, 1000))
+                {
+                    Attr(request, "SessionItems", s);
+                }
+
+                _client.PutAttributes(request);
+            }
+            else
+            {
+                // OdbcCommand to update the existing session item.
+
+                var request = new PutAttributesRequest
+                                  {
+                                      DomainName = _domain,
+                                      ItemName = BuildItemName(id),
+                                      Expected = new UpdateCondition
+                                                     {
+                                                         Name = "LockId",
+                                                         Value = ToString(lockId),
+                                                     }
+                                  };
+
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+
+                Attr(request, "Expires", now.AddMinutes(item.Timeout));
+                Attr(request, "Locked", false);
+
+                foreach (string s in SplitStringWithIndex(sessItems, 1000))
+                {
+                    Attr(request, "SessionItems", s);
+                }
+
+                _client.PutAttributes(request);
+            }
+        }
+
+        public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
+        {
+            return false;
+        }
 
         private SessionStateStoreData GetSessionStoreItem(bool lockRecord,
                                                           HttpContext context,
@@ -243,6 +274,12 @@ namespace SimpleDbSessionStore
                                                           out object lockId,
                                                           out SessionStateActions actionFlags)
         {
+            // GetSessionStoreItem is called by both the GetItem and 
+            // GetItemExclusive methods. GetSessionStoreItem retrieves the 
+            // session data from the data source. If the lockRecord parameter
+            // is true (in the case of GetItemExclusive), then GetSessionStoreItem
+            // locks the record and sets a new LockId and LockDate.
+
             // Initial values for return value and out parameters.
             SessionStateStoreData item = null;
             lockAge = TimeSpan.Zero;
@@ -346,7 +383,8 @@ namespace SimpleDbSessionStore
                     actionFlags = (SessionStateActions) FromString<int>(attr.First(x => x.Name == "Flags").Value);
                     timeout = FromString<int>(attr.First(x => x.Name == "Timeout").Value);
 
-                    serializedItems = UnSplitStringWithIndex(attr.Where(x => x.Name == "SessionItems").Select(x => x.Value));
+                    serializedItems =
+                        UnSplitStringWithIndex(attr.Where(x => x.Name == "SessionItems").Select(x => x.Value));
                 }
                 else
                 {
@@ -356,7 +394,6 @@ namespace SimpleDbSessionStore
             }
             else
             {
-                
             }
 
             // If the returned session item is expired, 
@@ -397,179 +434,12 @@ namespace SimpleDbSessionStore
                 // If the actionFlags parameter is not InitializeItem, 
                 // deserialize the stored SessionStateItemCollection.
                 if (actionFlags == SessionStateActions.InitializeItem)
-                    item = CreateNewStoreData(context, (int) _pConfig.Timeout.TotalMinutes);
+                    item = CreateNewStoreData(context, (int) _configSection.Timeout.TotalMinutes);
                 else
                     item = Deserialize(context, serializedItems, timeout);
             }
 
             return item;
-        }
-
-        private string UnSplitStringWithIndex(IEnumerable<string> chunks)
-        {
-            var str = "";
-
-            foreach (var s in chunks.OrderBy(x => x))
-            {
-                if (s != "")
-                {
-                    str += s.Substring(2);
-                }
-            }
-
-            return str;
-        }
-        
-        public override void InitializeRequest(HttpContext context)
-        {
-        }
-
-        public override void ReleaseItemExclusive(HttpContext context, string id, object lockId)
-        {
-            var request = new PutAttributesRequest
-                              {
-                                  DomainName = _domain,
-                                  ItemName = BuildItemName(id),
-                                  Expected = new UpdateCondition
-                                                 {
-                                                     Name = "LockId",
-                                                     Value = ToString(lockId),
-                                                 },
-                              };
-
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-
-            Attr(request, "Expires", now.AddMinutes(_pConfig.Timeout.TotalMinutes));
-            Attr(request, "Locked", false);
-
-            _client.PutAttributes(request);
-        }
-
-        public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
-        {
-            var del = new DeleteAttributesRequest
-                          {
-                              DomainName = _domain,
-                              ItemName = BuildItemName(id),
-                              Expected = new UpdateCondition
-                                             {
-                                                 Name = "LockId",
-                                                 Value = ToString(lockId),
-                                             },
-                          };
-
-            _client.DeleteAttributes(del);
-        }
-
-        private string BuildItemName(string sessionId)
-        {
-            return _prefix + "-" + sessionId.Trim();
-        }
-
-        public override void ResetItemTimeout(HttpContext context, string id)
-        {
-            var request = new PutAttributesRequest
-                              {
-                                  DomainName = _domain,
-                                  ItemName = BuildItemName(id),
-                              };
-
-            Attr(request, "Timeout", _pConfig.Timeout.TotalMinutes);
-
-            _client.PutAttributes(request);
-        }
-
-        public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item,
-                                                        object lockId, bool newItem)
-        {
-            // Serialize the SessionStateItemCollection as a string.
-            string sessItems = Serialize((SessionStateItemCollection) item.Items);
-
-            if (newItem)
-            {
-                // OdbcCommand to clear an existing expired session if it exists.
-
-                const string query = @"select itemName() from {0} where itemName() = '{1}' and Expires < '{2}'";
-                string ts = ToString(DateTimeOffset.UtcNow);
-
-                var r = new SelectRequest
-                            {
-                                SelectExpression = String.Format(query, _domain, BuildItemName(id), ts),
-                                ConsistentRead = true,
-                            };
-
-                DeleteableItem[] ids = _client.Select(r).SelectResult.Item
-                    .Select(x => new DeleteableItem {ItemName = x.Name})
-                    .ToArray();
-
-                if (ids.Any())
-                {
-                    var dr = new BatchDeleteAttributesRequest
-                                 {
-                                     DomainName = _domain,
-                                     Item = ids.ToList(),
-                                 };
-
-                    _client.BatchDeleteAttributes(dr);
-                }
-
-
-                // OdbcCommand to insert the new session item.
-                var request = new PutAttributesRequest
-                                  {
-                                      DomainName = _domain,
-                                      ItemName = BuildItemName(id),
-                                  };
-
-                DateTimeOffset now = DateTimeOffset.UtcNow;
-
-                Attr(request, "Created", now);
-                Attr(request, "Expires", now.AddMinutes(item.Timeout));
-                Attr(request, "LockDate", now);
-                Attr(request, "LockId", 0);
-                Attr(request, "Timeout", item.Timeout);
-                Attr(request, "Locked", false);
-                Attr(request, "Flags", 0);
-
-                foreach (var s in SplitStringWithIndex(sessItems, 1000))
-                {
-                    Attr(request, "SessionItems", s);
-                }
-
-                _client.PutAttributes(request);
-            }
-            else
-            {
-                // OdbcCommand to update the existing session item.
-
-                var request = new PutAttributesRequest
-                                  {
-                                      DomainName = _domain,
-                                      ItemName = BuildItemName(id),
-                                      Expected = new UpdateCondition
-                                                     {
-                                                         Name = "LockId",
-                                                         Value = ToString(lockId),
-                                                     }
-                                  };
-
-                DateTimeOffset now = DateTimeOffset.UtcNow;
-
-                Attr(request, "Expires", now.AddMinutes(item.Timeout));
-                Attr(request, "Locked", false);
-
-                foreach (var s in SplitStringWithIndex(sessItems, 1000))
-                {
-                    Attr(request, "SessionItems", s);
-                }
-
-                _client.PutAttributes(request);
-            }
-        }
-
-        public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
-        {
-            return false;
         }
 
         private string Serialize(SessionStateItemCollection items)
@@ -642,6 +512,111 @@ namespace SimpleDbSessionStore
             }
 
             return new SessionStateStoreData(sessionItems, staticObjects, timeout);
+        }
+
+        private string BuildItemName(string sessionId)
+        {
+            return _prefix + "-" + sessionId.Trim();
+        }
+
+        private static void Attr(PutAttributesRequest request, string name, object value, bool replace = true)
+        {
+            request.Attribute.Add(new ReplaceableAttribute {Name = name, Replace = replace, Value = ToString(value)});
+        }
+
+        private static string ToString(object value)
+        {
+            string str;
+
+            if (value is DateTimeOffset)
+            {
+                str = ((DateTimeOffset) value).ToString("o");
+            }
+            else
+            {
+                str = Convert.ToString(value, Ic);
+            }
+
+            return str;
+        }
+
+        private static T FromString<T>(string str)
+        {
+            object val;
+
+            if (typeof (T) == typeof (DateTimeOffset))
+            {
+                val = DateTimeOffset.ParseExact(str, "o", Ic);
+            }
+            else if (typeof (T) == typeof (bool))
+            {
+                val = Convert.ToBoolean(str, Ic);
+            }
+            else if (typeof (T) == typeof (int))
+            {
+                val = Convert.ToInt32(str, Ic);
+            }
+            else
+            {
+                throw new Exception("Unsupported type: " + typeof (T).Name);
+            }
+
+            return (T) val;
+        }
+
+        private static IEnumerable<string> SplitStringWithIndex(string str, int chunkSize)
+        {
+            return SplitString(str, chunkSize).Select((s, i) => i.ToString("X2") + s);
+        }
+
+        private static IEnumerable<string> SplitString(string str, int chunkSize)
+        {
+            int bytes = Encoding.UTF8.GetByteCount(str);
+
+            // shortcut
+            if (bytes < chunkSize)
+            {
+                return new[] {str};
+            }
+
+            var chunks = new List<string>();
+
+            Encoder encoder = Encoding.UTF8.GetEncoder();
+
+            var outputBytes = new byte[chunkSize];
+            char[] input = str.ToCharArray();
+
+            bool completed = false;
+
+            for (int i = 0; !completed;)
+            {
+                int bytesUsed;
+                int charsUsed;
+
+                encoder.Convert(input, i, input.Length - i, outputBytes, 0, outputBytes.Length, true, out charsUsed,
+                                out bytesUsed, out completed);
+
+                chunks.Add(Encoding.UTF8.GetString(outputBytes, 0, bytesUsed));
+
+                i += charsUsed;
+            }
+
+            return chunks;
+        }
+
+        private string UnSplitStringWithIndex(IEnumerable<string> chunks)
+        {
+            string str = "";
+
+            foreach (string s in chunks.OrderBy(x => x))
+            {
+                if (s != "")
+                {
+                    str += s.Substring(2);
+                }
+            }
+
+            return str;
         }
 
         private static Ascii85 GetAscii85()
