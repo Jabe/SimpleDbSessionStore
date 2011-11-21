@@ -99,6 +99,11 @@ namespace SimpleDbSessionStore
 
         public override void Dispose()
         {
+            if (_client != null)
+            {
+                _client.Dispose();
+                _client = null;
+            }
         }
 
         public override void EndRequest(HttpContext context)
