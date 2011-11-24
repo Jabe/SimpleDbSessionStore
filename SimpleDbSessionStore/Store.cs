@@ -8,6 +8,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Threading;
 using System.Web;
 using System.Web.Configuration;
 using System.Web.Hosting;
@@ -24,14 +25,14 @@ namespace SimpleDbSessionStore
     {
         private static readonly CultureInfo Ic = CultureInfo.InvariantCulture;
 
+        public static Func<Type, object> DependencyResolver { get; set; }
+
         private AmazonSimpleDB _client;
         private bool _compress;
         private SessionStateSection _configSection;
         private string _domain;
-        private string _key;
         private string _prefix;
-        private string _secret;
-        private string _serviceUrl;
+        private bool _clientOwned;
 
         public override void Initialize(string name, NameValueCollection config)
         {
@@ -53,26 +54,36 @@ namespace SimpleDbSessionStore
             _configSection = (SessionStateSection) cfg.GetSection("system.web/sessionState");
 
             _compress = _configSection.CompressionEnabled;
-
-            _key = config["key"];
-            _secret = config["secret"];
             _domain = config["domain"];
             _prefix = config["prefix"];
-            _serviceUrl = config["serviceUrl"];
 
-            if (string.IsNullOrEmpty(_key)) throw new ArgumentException("key");
-            if (string.IsNullOrEmpty(_secret)) throw new ArgumentException("secret");
             if (string.IsNullOrEmpty(_domain)) throw new ArgumentException("domain");
             if (string.IsNullOrEmpty(_prefix)) throw new ArgumentException("prefix");
 
-            var sdbc = new AmazonSimpleDBConfig();
-
-            if (!string.IsNullOrEmpty(_serviceUrl))
+            if (DependencyResolver != null)
             {
-                sdbc.ServiceURL = _serviceUrl;
+                _client = DependencyResolver(typeof (AmazonSimpleDB)) as AmazonSimpleDB;
             }
 
-            _client = AWSClientFactory.CreateAmazonSimpleDBClient(_key, _secret, sdbc);
+            if (_client == null)
+            {
+                string key = config["key"];
+                string secret = config["secret"];
+                string serviceUrl = config["serviceUrl"];
+
+                if (string.IsNullOrEmpty(key)) throw new ArgumentException("key");
+                if (string.IsNullOrEmpty(secret)) throw new ArgumentException("secret");
+
+                var sdbc = new AmazonSimpleDBConfig();
+
+                if (!string.IsNullOrEmpty(serviceUrl))
+                {
+                    sdbc.ServiceURL = serviceUrl;
+                }
+
+                _client = AWSClientFactory.CreateAmazonSimpleDBClient(key, secret, sdbc);
+                _clientOwned = true;
+            }
         }
 
         public override SessionStateStoreData CreateNewStoreData(HttpContext context, int timeout)
@@ -105,8 +116,9 @@ namespace SimpleDbSessionStore
 
         public override void Dispose()
         {
-            if (_client != null)
+            if (_clientOwned && _client != null)
             {
+                _clientOwned = false;
                 _client.Dispose();
                 _client = null;
             }
