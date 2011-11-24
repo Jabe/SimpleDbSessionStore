@@ -31,6 +31,7 @@ namespace SimpleDbSessionStore
         private string _key;
         private string _prefix;
         private string _secret;
+        private string _serviceUrl;
 
         public override void Initialize(string name, NameValueCollection config)
         {
@@ -57,14 +58,19 @@ namespace SimpleDbSessionStore
             _secret = config["secret"];
             _domain = config["domain"];
             _prefix = config["prefix"];
+            _serviceUrl = config["serviceUrl"];
 
             if (string.IsNullOrEmpty(_key)) throw new ArgumentException("key");
             if (string.IsNullOrEmpty(_secret)) throw new ArgumentException("secret");
             if (string.IsNullOrEmpty(_domain)) throw new ArgumentException("domain");
             if (string.IsNullOrEmpty(_prefix)) throw new ArgumentException("prefix");
 
-            // TODO: config
-            var sdbc = new AmazonSimpleDBConfig {ServiceURL = "https://sdb.eu-west-1.amazonaws.com"};
+            var sdbc = new AmazonSimpleDBConfig();
+
+            if (!string.IsNullOrEmpty(_serviceUrl))
+            {
+                sdbc.ServiceURL = _serviceUrl;
+            }
 
             _client = AWSClientFactory.CreateAmazonSimpleDBClient(_key, _secret, sdbc);
         }
