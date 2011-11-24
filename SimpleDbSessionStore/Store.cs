@@ -321,7 +321,6 @@ namespace SimpleDbSessionStore
             
             if (lockRecord)
             {
-                // TODO: we could run both queries in parallel
                 TryAcquireLock(id, out locked, out found);
             }
 
@@ -332,7 +331,6 @@ namespace SimpleDbSessionStore
             {
                 found = false;
 
-                // TODO: we could run both queries in parallel
                 List<Attribute> attributes = LoadSession(id);
 
                 // valid looking session?
