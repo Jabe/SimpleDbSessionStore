@@ -585,7 +585,7 @@ namespace SimpleDbSessionStore
 
             if (value is DateTimeOffset)
             {
-                str = ((DateTimeOffset) value).ToString("o");
+                str = ((DateTimeOffset) value).ToUniversalTime().ToString("o");
             }
             else
             {
